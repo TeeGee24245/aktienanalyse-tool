@@ -379,6 +379,8 @@ else:
 
 st.markdown(f"<div class='{rec_class}'><strong style='font-size:18px'>{rec_text}</strong></div>", unsafe_allow_html=True)
 
+# Bewertungsmodell (DCF) moved to main.py — rendering handled centrally in the main app
+
 st.markdown('**Kennzahlen & Fundamentaldaten**')
 # compute/normalize a few metrics for display
 net_margin = info.get('netMargins')
