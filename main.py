@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from concurrent.futures import ThreadPoolExecutor
 import yfinance as yf
 from pathlib import Path
 
@@ -29,6 +30,36 @@ html, body, [class*="css"]{background:var(--bg) !important; color:#e6eef8 !impor
 </style>
 '''
 st.markdown(_CSS, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PEER-GRUPPEN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PEERS: dict[str, list[str]] = {
+    "AAPL":    ["MSFT", "GOOGL", "META", "AMZN"],
+    "MSFT":    ["AAPL", "GOOGL", "AMZN", "CRM"],
+    "GOOGL":   ["META", "MSFT", "AAPL", "AMZN"],
+    "SIE.DE":  ["SAP.DE", "ABB", "HON", "EMR"],
+    "SAP.DE":  ["SIE.DE", "CRM", "ORCL", "MSFT"],
+    "NVDA":    ["AMD", "INTC", "QCOM", "AVGO"],
+    "ASML.AS": ["AMAT", "LRCX", "KLAC", "TER"],
+}
+
+_SECTOR_PEERS: dict[str, list[str]] = {
+    "Technology":             ["MSFT", "AAPL", "GOOGL", "META"],
+    "Consumer Cyclical":      ["AMZN", "TSLA", "NKE",   "MCD"],
+    "Healthcare":             ["JNJ",  "UNH",  "PFE",   "MRK"],
+    "Financial Services":     ["JPM",  "BAC",  "WFC",   "GS"],
+    "Industrials":            ["HON",  "MMM",  "CAT",   "GE"],
+    "Energy":                 ["XOM",  "CVX",  "COP",   "SLB"],
+    "Basic Materials":        ["BHP",  "RIO",  "FCX",   "NEM"],
+    "Consumer Defensive":     ["KO",   "PEP",  "WMT",   "PG"],
+    "Communication Services": ["META", "GOOGL", "NFLX", "DIS"],
+    "Real Estate":            ["AMT",  "PLD",  "CCI",   "EQIX"],
+    "Utilities":              ["NEE",  "DUK",  "SO",    "AEP"],
+    "Semiconductors":         ["NVDA", "AMD",  "INTC",  "QCOM"],
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -207,6 +238,50 @@ def score_gauge(score, title):
     ))
     fig.update_layout(height=220, paper_bgcolor='rgba(0,0,0,0)', font={'color': '#e6eef8'})
     return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PEER-DATEN LADEN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_one_peer(tk: str) -> dict:
+    try:
+        info = yf.Ticker(tk).info or {}
+        gm = info.get('grossMargins')
+        rg = info.get('revenueGrowth')
+
+        pm = info.get('profitMargins') or info.get('netMargins')
+        if pm is None:
+            ni = info.get('netIncomeToCommon', 0)
+            rev = info.get('totalRevenue', 0)
+            pm = ni / rev if rev else None
+        net_margin = f"{pm * 100:.1f} %" if pm is not None else "—"
+
+        dy = info.get('dividendYield') or 0
+        div_yield = f"{dy * 100:.2f} %" if dy else "—"
+
+        return {
+            'Ticker':              tk,
+            'Unternehmen':         info.get('shortName') or info.get('longName') or tk,
+            'Kurs':                info.get('regularMarketPrice') or info.get('currentPrice'),
+            'KGV':                 info.get('trailingPE') or info.get('forwardPE'),
+            'KUV':                 info.get('priceToSalesTrailing12Months'),
+            'Bruttomarge %':       round(float(gm) * 100, 1) if gm is not None else None,
+            'Nettomarge %':        net_margin,
+            'Umsatzwachstum %':    round(float(rg) * 100, 1) if rg is not None else None,
+            'Dividendenrendite %': div_yield,
+            'Währung':             info.get('currency', ''),
+        }
+    except Exception:
+        return {'Ticker': tk, 'Unternehmen': tk}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_peers_data(tickers: tuple) -> pd.DataFrame:
+    """Lädt Kennzahlen für alle Peer-Ticker parallel (ThreadPoolExecutor)."""
+    with ThreadPoolExecutor(max_workers=min(len(tickers), 6)) as ex:
+        rows = list(ex.map(_fetch_one_peer, tickers))
+    return pd.DataFrame(rows)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -405,6 +480,67 @@ def show_aktienanalyse(ticker: str):
             })
             st.markdown('**Projizierte Free Cash Flows (10 Jahre)**')
             st.table(proj_df)
+
+    # ── Peer-Vergleich ────────────────────────────────────────────────────────
+    st.markdown('---')
+    st.markdown('**Peer-Vergleich**')
+
+    ticker_up = ticker.upper()
+    peer_list = PEERS.get(ticker_up)
+
+    if peer_list is None:
+        sector = info.get('sector', '')
+        peer_list = [p for p in _SECTOR_PEERS.get(sector, []) if p != ticker_up][:4]
+        if peer_list:
+            st.caption(
+                f"Keine vordefinierten Peers für {ticker_up} — "
+                f"zeige branchenverwandte Werte ({sector})"
+            )
+
+    if not peer_list:
+        st.info('Keine Peer-Daten verfügbar für diesen Ticker.')
+    else:
+        all_peer_tickers = tuple([ticker_up] + [p for p in peer_list if p != ticker_up])
+        with st.spinner('Lade Peer-Daten parallel …'):
+            peer_df = fetch_peers_data(all_peer_tickers)
+
+        if peer_df.empty:
+            st.warning('Peer-Daten konnten nicht geladen werden.')
+        else:
+            def _fn(v, dec=1, suf=''):
+                try:
+                    return f"{float(v):.{dec}f}{suf}" if v is not None else '—'
+                except Exception:
+                    return '—'
+
+            display = peer_df.copy()
+            # Unternehmen (Ticker) zusammenführen und an erste Stelle
+            display.insert(
+                0, 'Unternehmen (Ticker)',
+                display['Unternehmen'].fillna(display['Ticker']) + ' (' + display['Ticker'] + ')',
+            )
+            display.drop(columns=['Unternehmen', 'Ticker', 'Währung'], errors='ignore', inplace=True)
+
+            display['Kurs']                = display['Kurs'].apply(lambda x: _fn(x, 2))
+            display['KGV']                 = display['KGV'].apply(lambda x: _fn(x, 1))
+            display['KUV']                 = display['KUV'].apply(lambda x: _fn(x, 2))
+            display['Bruttomarge %']       = display['Bruttomarge %'].apply(lambda x: _fn(x, 1, ' %'))
+            display['Nettomarge %']        = display['Nettomarge %'].fillna('—').apply(lambda x: '—' if x is None or str(x) == 'None' else x)
+            display['Umsatzwachstum %']    = display['Umsatzwachstum %'].apply(lambda x: _fn(x, 1, ' %'))
+            display['Dividendenrendite %'] = display['Dividendenrendite %'].fillna('—').apply(lambda x: '—' if x is None or str(x) == 'None' else x)
+
+            # Erste Zeile (analysierte Aktie) hervorheben
+            def _highlight_main(row):
+                if row.name == 0:
+                    return ['background-color:#1a2744; color:#2dd4bf; font-weight:700'] * len(row)
+                return [''] * len(row)
+
+            styled = display.style.apply(_highlight_main, axis=1)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+            st.caption(
+                f"Hervorgehobene Zeile = analysierte Aktie ({ticker_up}). "
+                "Kurs in Heimatwährung des jeweiligen Titels."
+            )
 
     # ── Kennzahlen & Fundamentaldaten ─────────────────────────────────────────
     st.markdown('**Kennzahlen & Fundamentaldaten**')
